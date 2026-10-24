@@ -1,0 +1,9 @@
+{
+  "name": "tienda-server",
+  "version": "1.0.0",
+  "description": "Servidor para app de mapa de tienda y escaneo de productos",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
