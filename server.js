@@ -193,6 +193,59 @@ const requestHandler = async (req, res) => {
     return;
   }
 
+  // Crear producto nuevo
+  if (url === "/api/products" && method === "POST") {
+    try {
+      const body = await readBody(req);
+      if (!body.code) {
+        sendJSON(res, 400, { error: "Falta el código" });
+        return;
+      }
+      if (db.products.find(p => p.code === body.code)) {
+        sendJSON(res, 409, { error: "Ya existe un producto con ese código" });
+        return;
+      }
+      const newProduct = {
+        id: db.products.length > 0 ? Math.max(...db.products.map(p => p.id)) + 1 : 1,
+        code: body.code,
+        name: body.name || "Producto sin nombre",
+        category: body.category || "general",
+        size: body.size || null,
+        color: body.color || null,
+        price: body.price || 0,
+        zone_id: body.zone_id || null,
+        shelf_position: body.shelf_position || null,
+      };
+      db.products.push(newProduct);
+      saveDB();
+      const z = db.zones.find(zone => zone.id === newProduct.zone_id);
+      sendJSON(res, 201, { ...newProduct, zone_name: z ? z.name : null, zone_type: z ? z.type : null });
+    } catch (e) {
+      sendJSON(res, 400, { error: "Datos inválidos" });
+    }
+    return;
+  }
+
+  // Editar producto por código
+  if (productMatch && method === "PUT" && !productMatch[2]) {
+    const code = productMatch[1];
+    try {
+      const body = await readBody(req);
+      const idx = db.products.findIndex(p => p.code === code);
+      if (idx === -1) {
+        sendJSON(res, 404, { error: "Producto no encontrado" });
+        return;
+      }
+      db.products[idx] = { ...db.products[idx], ...body, code };
+      saveDB();
+      const z = db.zones.find(zone => zone.id === db.products[idx].zone_id);
+      sendJSON(res, 200, { ...db.products[idx], zone_name: z ? z.name : null, zone_type: z ? z.type : null });
+    } catch (e) {
+      sendJSON(res, 400, { error: "Datos inválidos" });
+    }
+    return;
+  }
+
   if (productMatch && method === "POST" && productMatch[2] === "/zone") {
     const code = productMatch[1];
     try {
