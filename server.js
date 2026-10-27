@@ -1,21 +1,25 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 
 const PORT = process.env.PORT || 3001;
 const IS_VERCEL = !!process.env.VERCEL;
 const DB_FILE = IS_VERCEL ? "/tmp/store.db.json" : path.join(__dirname, "store.db.json");
+const GIST_ID = process.env.GIST_ID || "25c0ed05a00271e72b42aef8530b8e52";
+const GH_TOKEN = process.env.GH_TOKEN;
 
 // Cargar o crear base de datos JSON
 let db = { zones: [], products: [], scans: [] };
+let gistLoaded = false;
 
-function loadDB() {
+function loadDBLocal() {
   try {
     if (fs.existsSync(DB_FILE)) {
       db = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
     }
   } catch (e) {
-    console.error("Error cargando DB:", e.message);
+    console.error("Error cargando DB local:", e.message);
     db = { zones: [], products: [], scans: [] };
   }
   if (!db.zones) db.zones = [];
@@ -23,12 +27,91 @@ function loadDB() {
   if (!db.scans) db.scans = [];
 }
 
-function saveDB() {
+function saveDBLocal() {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
   } catch (e) {
-    console.error("Error guardando DB:", e.message);
+    console.error("Error guardando DB local:", e.message);
   }
+}
+
+function syncToGist() {
+  if (!GIST_ID || !GH_TOKEN) return;
+  try {
+    const payload = JSON.stringify({
+      files: {
+        "store.db.json": {
+          content: JSON.stringify(db, null, 2),
+        },
+      },
+    });
+    const req = https.request({
+      hostname: "api.github.com",
+      path: `/gists/${GIST_ID}`,
+      method: "PATCH",
+      headers: {
+        "User-Agent": "tienda-server",
+        "Authorization": `token ${GH_TOKEN}`,
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    }, (res) => {});
+    req.on("error", (e) => console.error("Error actualizando Gist:", e.message));
+    req.write(payload);
+    req.end();
+  } catch (e) {
+    console.error("Error syncToGist:", e.message);
+  }
+}
+
+function syncFromGist() {
+  return new Promise((resolve) => {
+    if (!GIST_ID || !GH_TOKEN) return resolve(false);
+    const req = https.request({
+      hostname: "api.github.com",
+      path: `/gists/${GIST_ID}`,
+      method: "GET",
+      headers: {
+        "User-Agent": "tienda-server",
+        "Authorization": `token ${GH_TOKEN}`,
+        "Accept": "application/vnd.github.v3+json",
+      },
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        try {
+          if (res.statusCode === 200) {
+            const data = JSON.parse(body);
+            const file = data.files && data.files["store.db.json"];
+            if (file && file.content) {
+              const remote = JSON.parse(file.content);
+              if (remote.zones && remote.zones.length > 0) db.zones = remote.zones;
+              if (remote.products && remote.products.length > 0) db.products = remote.products;
+              if (remote.scans) db.scans = remote.scans;
+              saveDBLocal();
+              gistLoaded = true;
+              return resolve(true);
+            }
+          }
+        } catch (e) {
+          console.error("Error parseando contenido de Gist:", e.message);
+        }
+        resolve(false);
+      });
+    });
+    req.on("error", (e) => {
+      console.error("Error en petición Gist:", e.message);
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+function saveDB() {
+  saveDBLocal();
+  syncToGist();
 }
 
 function seed() {
@@ -54,11 +137,14 @@ function seed() {
       { id: 7, code: "ZAP-001", name: "Zapato urbano gris", category: "zapato", size: "42", color: "gris", price: 18990, zone_id: 3, shelf_position: "cajón 1" },
     ];
   }
-  saveDB();
+  saveDBLocal();
 }
 
-loadDB();
+loadDBLocal();
 seed();
+
+// Iniciar sincronización con Gist en background
+syncFromGist().catch(() => {});
 
 // Helper: enviar JSON
 function sendJSON(res, status, data) {
@@ -66,7 +152,7 @@ function sendJSON(res, status, data) {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   });
   res.end(JSON.stringify(data));
 }
@@ -88,9 +174,19 @@ const requestHandler = async (req, res) => {
 
   // CORS preflight
   if (method === "OPTIONS") {
-    res.writeHead(204);
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400",
+    });
     res.end();
     return;
+  }
+
+  // Asegurar que Gist haya cargado al menos una vez
+  if (!gistLoaded) {
+    try { await syncFromGist(); } catch (_) {}
   }
 
   // --- ZONES ---
